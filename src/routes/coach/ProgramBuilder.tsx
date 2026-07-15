@@ -4,7 +4,13 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '../../auth/AuthContext';
 import { DAY_NAMES } from '../../lib/dates';
 import { getPlayerForCoach } from '../../api/players';
-import { listProgramDays, upsertProgramDay } from '../../api/programs';
+import {
+  listProgramDays,
+  upsertProgramDay,
+  createFullDay,
+  duplicateWeek,
+  type DraftWorkoutData,
+} from '../../api/programs';
 import { listWorkouts, createWorkout, updateWorkout, deleteWorkout } from '../../api/workouts';
 import {
   listExercises,
@@ -35,6 +41,13 @@ export default function ProgramBuilder() {
 
   const weekDays = (days ?? []).filter((d) => d.week_number === week);
   const byDow = new Map(weekDays.map((d) => [d.day_of_week, d]));
+  const qc = useQueryClient();
+
+  const [dupTo, setDupTo] = useState(week + 1);
+  const duplicate = useMutation({
+    mutationFn: () => duplicateWeek(playerId!, coachId, week, dupTo),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['program', playerId] }),
+  });
 
   return (
     <div className="stack">
@@ -58,6 +71,43 @@ export default function ProgramBuilder() {
           </select>
         </div>
       </div>
+
+      {weekDays.length > 0 && (
+        <div className="card row" style={{ justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.6rem' }}>
+          <span className="muted" style={{ fontSize: '0.85rem' }}>
+            Copy Week {week}'s full schedule to another week (overwrites the target week):
+          </span>
+          <div className="row" style={{ gap: '0.5rem' }}>
+            <select
+              value={dupTo}
+              onChange={(e) => setDupTo(Number(e.target.value))}
+              style={{ width: 'auto' }}
+            >
+              {Array.from({ length: 12 }, (_, i) => i + 1)
+                .filter((w) => w !== week)
+                .map((w) => (
+                  <option key={w} value={w}>
+                    Week {w}
+                  </option>
+                ))}
+            </select>
+            <button
+              onClick={() => {
+                if (confirm(`Copy Week ${week} to Week ${dupTo}? This overwrites Week ${dupTo}.`)) {
+                  duplicate.mutate();
+                }
+              }}
+              disabled={duplicate.isPending}
+            >
+              {duplicate.isPending ? 'Copying…' : 'Duplicate week'}
+            </button>
+          </div>
+          {duplicate.isSuccess && (
+            <span className="badge active">Copied to Week {dupTo} ✓</span>
+          )}
+          {duplicate.error && <span className="error">{(duplicate.error as Error).message}</span>}
+        </div>
+      )}
 
       <div className="stack">
         {DAY_NAMES.map((name, dow) => (
@@ -95,10 +145,12 @@ function DayCard({
   const [open, setOpen] = useState(false);
   const [dayType, setDayType] = useState(existing?.day_type ?? 'training');
   const [diet, setDiet] = useState(existing?.diet_plan ?? '');
+  // Draft workouts (each with draft exercises) for a not-yet-created day.
+  const [draftWorkouts, setDraftWorkouts] = useState<DraftWorkoutData[]>([]);
 
   const saveDay = useMutation({
-    mutationFn: () =>
-      upsertProgramDay({
+    mutationFn: async () => {
+      const base = {
         player_id: playerId,
         coach_id: coachId,
         week_number: week,
@@ -106,8 +158,17 @@ function DayCard({
         day_type: dayType,
         title: existing?.title ?? null,
         diet_plan: diet || null,
-      }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['program', playerId] }),
+      };
+      if (!existing && dayType === 'training' && draftWorkouts.length > 0) {
+        await createFullDay(base, draftWorkouts);
+      } else {
+        await upsertProgramDay(base);
+      }
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['program', playerId] });
+      setDraftWorkouts([]);
+    },
   });
 
   return (
@@ -146,6 +207,11 @@ function DayCard({
             <textarea rows={2} value={diet} onChange={(e) => setDiet(e.target.value)} />
           </div>
 
+          {/* New training day: build workouts + exercises before the first save. */}
+          {!existing && dayType === 'training' && (
+            <DraftWorkoutsEditor drafts={draftWorkouts} setDrafts={setDraftWorkouts} />
+          )}
+
           <div className="row">
             <button onClick={() => saveDay.mutate()} disabled={saveDay.isPending}>
               {saveDay.isPending ? 'Saving…' : existing ? 'Save day' : 'Create day'}
@@ -153,14 +219,131 @@ function DayCard({
             {saveDay.error && <span className="error">{(saveDay.error as Error).message}</span>}
           </div>
 
+          {/* Existing training day: live workout editor. */}
           {existing && dayType === 'training' && <WorkoutList programDayId={existing.id} playerId={playerId} />}
-          {!existing && dayType === 'training' && (
-            <p className="muted" style={{ fontSize: '0.85rem' }}>
-              Create the day first, then add workouts.
-            </p>
-          )}
         </div>
       )}
+    </div>
+  );
+}
+
+// ---- Draft editors (for a day that doesn't exist in the DB yet) ----
+
+function DraftWorkoutsEditor({
+  drafts,
+  setDrafts,
+}: {
+  drafts: DraftWorkoutData[];
+  setDrafts: React.Dispatch<React.SetStateAction<DraftWorkoutData[]>>;
+}) {
+  const addWorkout = () =>
+    setDrafts((ds) => [...ds, { name: '', exercises: [] }]);
+  const removeWorkout = (i: number) =>
+    setDrafts((ds) => ds.filter((_, idx) => idx !== i));
+  const setWorkoutName = (i: number, name: string) =>
+    setDrafts((ds) => ds.map((d, idx) => (idx === i ? { ...d, name } : d)));
+  const addExercise = (i: number) =>
+    setDrafts((ds) =>
+      ds.map((d, idx) =>
+        idx === i
+          ? {
+              ...d,
+              exercises: [
+                ...d.exercises,
+                {
+                  name: '',
+                  target_sets: 3,
+                  target_reps: '10',
+                  coach_comment: null,
+                  coach_video_url: null,
+                  coach_video_is_external: false,
+                },
+              ],
+            }
+          : d
+      )
+    );
+  const setExercise = (wi: number, ei: number, patch: Partial<DraftWorkoutData['exercises'][number]>) =>
+    setDrafts((ds) =>
+      ds.map((d, idx) =>
+        idx === wi
+          ? { ...d, exercises: d.exercises.map((ex, j) => (j === ei ? { ...ex, ...patch } : ex)) }
+          : d
+      )
+    );
+  const removeExercise = (wi: number, ei: number) =>
+    setDrafts((ds) =>
+      ds.map((d, idx) =>
+        idx === wi ? { ...d, exercises: d.exercises.filter((_, j) => j !== ei) } : d
+      )
+    );
+
+  return (
+    <div className="stack" style={{ marginTop: '0.3rem' }}>
+      <strong style={{ fontSize: '0.9rem' }}>Workouts</strong>
+      {drafts.length === 0 && (
+        <p className="muted" style={{ fontSize: '0.85rem', margin: 0 }}>
+          Add workouts and exercises now — they'll be saved together with the day.
+        </p>
+      )}
+      {drafts.map((w, wi) => (
+        <div key={wi} className="card stack" style={{ background: 'var(--surface-2)' }}>
+          <div className="row" style={{ justifyContent: 'space-between' }}>
+            <div className="field" style={{ margin: 0, flex: 1 }}>
+              <label>Workout name</label>
+              <input value={w.name} onChange={(e) => setWorkoutName(wi, e.target.value)} placeholder="Push" />
+            </div>
+            <button className="danger" style={{ alignSelf: 'flex-end' }} type="button" onClick={() => removeWorkout(wi)}>
+              Remove
+            </button>
+          </div>
+
+          {w.exercises.map((ex, ei) => (
+            <div key={ei} className="card stack" style={{ background: 'var(--surface)' }}>
+              <div className="field" style={{ margin: 0 }}>
+                <label>Exercise name</label>
+                <input value={ex.name} onChange={(e) => setExercise(wi, ei, { name: e.target.value })} placeholder="Chest Press" />
+              </div>
+              <div className="row">
+                <div className="field" style={{ margin: 0, flex: 1 }}>
+                  <label>Target sets</label>
+                  <input
+                    type="number"
+                    value={ex.target_sets ?? ''}
+                    onChange={(e) => setExercise(wi, ei, { target_sets: e.target.value ? Number(e.target.value) : null })}
+                  />
+                </div>
+                <div className="field" style={{ margin: 0, flex: 1 }}>
+                  <label>Target reps</label>
+                  <input
+                    value={ex.target_reps ?? ''}
+                    onChange={(e) => setExercise(wi, ei, { target_reps: e.target.value || null })}
+                    placeholder="8-12"
+                  />
+                </div>
+              </div>
+              <div className="field" style={{ margin: 0 }}>
+                <label>Comment</label>
+                <textarea
+                  rows={2}
+                  value={ex.coach_comment ?? ''}
+                  onChange={(e) => setExercise(wi, ei, { coach_comment: e.target.value || null })}
+                />
+              </div>
+              <button className="danger" type="button" onClick={() => removeExercise(wi, ei)}>
+                Remove exercise
+              </button>
+            </div>
+          ))}
+
+          <button className="secondary" type="button" onClick={() => addExercise(wi)}>
+            + Add exercise
+          </button>
+        </div>
+      ))}
+      <button className="secondary" type="button" onClick={addWorkout}>
+        + Add workout
+      </button>
     </div>
   );
 }
