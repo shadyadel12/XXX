@@ -10,13 +10,15 @@ export default function AnalysisView({ playerId }: { playerId: string }) {
     queryFn: () => getPlayerAnalysis(playerId),
   });
 
+  type Range = 'all' | 'today' | 'week' | 'month';
   const [workoutFilter, setWorkoutFilter] = useState<string>('');
   const [exerciseFilter, setExerciseFilter] = useState<string>('');
-  const [todayOnly, setTodayOnly] = useState(false);
+  const [range, setRange] = useState<Range>('all');
 
   const filtered = useMemo(() => {
     if (!data) return { groups: [], totalCompleted: 0, totalLogged: 0 };
     const all = groupByExerciseName(data);
+    const rangeStart = rangeStartISO(range); // null = no lower bound
     const today = todayISO();
 
     const byWorkout = workoutFilter
@@ -26,11 +28,15 @@ export default function AnalysisView({ playerId }: { playerId: string }) {
       ? byWorkout.filter((g) => g.exerciseName === exerciseFilter)
       : byWorkout;
 
-    // Filter logs inside each group when today-only is on, then drop empty groups.
+    // Filter logs inside each group by the date range, then drop empty groups.
     const groups = byExercise
       .map((g) => ({
         ...g,
-        logs: todayOnly ? g.logs.filter((l) => l.log_date === today) : g.logs,
+        logs: g.logs.filter((l) => {
+          if (range === 'today') return l.log_date === today;
+          if (rangeStart) return l.log_date >= rangeStart && l.log_date <= today;
+          return true;
+        }),
       }))
       .filter((g) => g.logs.length > 0);
 
@@ -41,7 +47,7 @@ export default function AnalysisView({ playerId }: { playerId: string }) {
       totalCompleted += g.logs.filter((l) => l.is_completed).length;
     }
     return { groups, totalCompleted, totalLogged };
-  }, [data, workoutFilter, exerciseFilter, todayOnly]);
+  }, [data, workoutFilter, exerciseFilter, range]);
 
   // Options for the dropdowns come from the UNFILTERED analysis, so switching
   // between filters never accidentally hides an option.
@@ -61,7 +67,7 @@ export default function AnalysisView({ playerId }: { playerId: string }) {
   if (error) return <p className="error">{(error as Error).message}</p>;
   if (!data) return null;
 
-  const filterActive = !!workoutFilter || !!exerciseFilter || todayOnly;
+  const filterActive = !!workoutFilter || !!exerciseFilter || range !== 'all';
 
   return (
     <div className="stack">
@@ -85,20 +91,20 @@ export default function AnalysisView({ playerId }: { playerId: string }) {
             ))}
           </select>
         </div>
-        <label className="row" style={{ gap: '0.4rem', alignItems: 'center' }}>
-          <input
-            type="checkbox"
-            style={{ width: 'auto' }}
-            checked={todayOnly}
-            onChange={(e) => setTodayOnly(e.target.checked)}
-          />
-          Today only
-        </label>
+        <div className="field" style={{ margin: 0, flex: 1, minWidth: 140 }}>
+          <label>Range</label>
+          <select value={range} onChange={(e) => setRange(e.target.value as Range)}>
+            <option value="all">All time</option>
+            <option value="today">Today only</option>
+            <option value="week">This week (Sat–Fri)</option>
+            <option value="month">This month</option>
+          </select>
+        </div>
         {filterActive && (
           <button
             className="secondary"
             type="button"
-            onClick={() => { setWorkoutFilter(''); setExerciseFilter(''); setTodayOnly(false); }}
+            onClick={() => { setWorkoutFilter(''); setExerciseFilter(''); setRange('all'); }}
           >
             Clear
           </button>
@@ -203,6 +209,27 @@ function parseWeight(w: string | null): number | null {
   if (!w) return null;
   const m = w.match(/[\d.]+/);
   return m ? parseFloat(m[0]) : null;
+}
+
+/**
+ * Start date (YYYY-MM-DD) for a filter range.
+ * - week: most recent Saturday (or today if today is Saturday)
+ * - month: 1st of the current month
+ * Returns null for 'all' / 'today' (today is handled separately).
+ */
+function rangeStartISO(range: 'all' | 'today' | 'week' | 'month'): string | null {
+  if (range === 'all' || range === 'today') return null;
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = now.getMonth();
+  if (range === 'month') {
+    return `${y}-${String(m + 1).padStart(2, '0')}-01`;
+  }
+  // range === 'week' : back up to the most recent Saturday.
+  // JS getDay(): Sun=0, Mon=1, ..., Sat=6.
+  const daysSinceSat = (now.getDay() + 1) % 7; // Sat=0, Sun=1, ..., Fri=6
+  const start = new Date(y, m, now.getDate() - daysSinceSat);
+  return `${start.getFullYear()}-${String(start.getMonth() + 1).padStart(2, '0')}-${String(start.getDate()).padStart(2, '0')}`;
 }
 
 function StatCard({ label, value }: { label: string; value: number }) {
