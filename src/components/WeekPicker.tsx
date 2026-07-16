@@ -1,8 +1,9 @@
 import { useState } from 'react';
 
 /**
- * Popover UI: pick which target weeks to copy into, then click Duplicate.
- * `excludeWeek` is the source week (never selectable — you can't copy to self).
+ * Dropdown that lets the coach pick how many consecutive weeks to copy into,
+ * starting from the week right after the source (excludeWeek).
+ * "Next 1 week" → [excludeWeek + 1], "next 2 weeks" → [excludeWeek + 1, excludeWeek + 2], etc.
  */
 export default function WeekPicker({
   excludeWeek,
@@ -19,17 +20,21 @@ export default function WeekPicker({
   onCancel: () => void;
   label?: string;
 }) {
-  const [picked, setPicked] = useState<Set<number>>(new Set());
+  const maxN = totalWeeks - excludeWeek; // how many weeks come after the source
+  const [n, setN] = useState(1);
 
-  const toggle = (w: number) => {
-    setPicked((prev) => {
-      const next = new Set(prev);
-      if (next.has(w)) next.delete(w); else next.add(w);
-      return next;
-    });
-  };
+  if (maxN <= 0) {
+    return (
+      <div className="card stack" style={{ background: 'var(--surface-2)', borderColor: 'var(--accent)', gap: '0.6rem' }}>
+        <span className="muted" style={{ fontSize: '0.85rem' }}>
+          No weeks after Week {excludeWeek} to copy into.
+        </span>
+        <button type="button" className="secondary" onClick={onCancel}>Cancel</button>
+      </div>
+    );
+  }
 
-  const all = Array.from({ length: totalWeeks }, (_, i) => i + 1).filter((w) => w !== excludeWeek);
+  const targetWeeks = Array.from({ length: n }, (_, i) => excludeWeek + 1 + i);
 
   return (
     <div
@@ -37,40 +42,31 @@ export default function WeekPicker({
       style={{ background: 'var(--surface-2)', borderColor: 'var(--accent)', gap: '0.6rem' }}
     >
       <strong style={{ fontSize: '0.9rem' }}>{label}</strong>
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem' }}>
-        {all.map((w) => {
-          const on = picked.has(w);
-          return (
-            <label
-              key={w}
-              className="row"
-              style={{
-                gap: '0.3rem',
-                padding: '0.3em 0.6em',
-                border: `1px solid ${on ? 'var(--accent)' : 'var(--border)'}`,
-                borderRadius: 999,
-                background: on ? 'rgba(79, 140, 255, 0.15)' : 'transparent',
-                cursor: 'pointer',
-              }}
-            >
-              <input
-                type="checkbox"
-                style={{ width: 'auto' }}
-                checked={on}
-                onChange={() => toggle(w)}
-              />
-              W{w}
-            </label>
-          );
-        })}
+      <div className="row" style={{ gap: '0.6rem', alignItems: 'center' }}>
+        <label style={{ fontSize: '0.9rem', whiteSpace: 'nowrap' }}>Copy to next</label>
+        <select
+          value={n}
+          onChange={(e) => setN(Number(e.target.value))}
+          style={{ width: 'auto' }}
+          disabled={busy}
+        >
+          {Array.from({ length: maxN }, (_, i) => i + 1).map((count) => (
+            <option key={count} value={count}>
+              {count} week{count === 1 ? '' : 's'}
+            </option>
+          ))}
+        </select>
+        <span className="muted" style={{ fontSize: '0.8rem' }}>
+          → W{targetWeeks[0]}{targetWeeks.length > 1 ? `–W${targetWeeks[targetWeeks.length - 1]}` : ''}
+        </span>
       </div>
       <div className="row">
         <button
           type="button"
-          onClick={() => onDuplicate([...picked].sort((a, b) => a - b))}
-          disabled={busy || picked.size === 0}
+          onClick={() => onDuplicate(targetWeeks)}
+          disabled={busy}
         >
-          {busy ? 'Duplicating…' : `Duplicate to ${picked.size} week${picked.size === 1 ? '' : 's'}`}
+          {busy ? 'Duplicating…' : `Duplicate to ${n} week${n === 1 ? '' : 's'}`}
         </button>
         <button type="button" className="secondary" onClick={onCancel} disabled={busy}>
           Cancel

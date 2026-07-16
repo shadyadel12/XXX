@@ -1,3 +1,4 @@
+import * as XLSX from 'xlsx';
 import { supabase } from '../lib/supabase';
 import type { ProgramDay, DayType } from '../types/database.types';
 
@@ -395,6 +396,123 @@ export function generateCsvTemplate(): string {
     ['1', 'Mon', 'training', 'Pull Day', 'Barbell Row',   '4', '8',    '50kg',  'Squeeze at top',    '', ''],
   ];
   return [header, ...examples.map((r) => r.map(csvEscape).join(','))].join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// Excel import / export (SheetJS)
+// ---------------------------------------------------------------------------
+
+/** Download a pre-formatted .xlsx template the coach fills in and re-uploads. */
+export function generateXlsxTemplate(): void {
+  const headers = [
+    'week', 'day', 'day_type', 'workout', 'exercise',
+    'target_sets', 'target_reps', 'target_weight',
+    'coach_comment', 'coach_video_url', 'diet_plan',
+  ];
+  const examples = [
+    [1, 'Sat', 'training', 'Push Day', 'Bench Press',    4, '8-12', '60kg', 'Controlled tempo', '', 'High protein day'],
+    [1, 'Sat', 'training', 'Push Day', 'Overhead Press', 3, '10',   '35kg', '',                  '', ''],
+    [1, 'Sun', 'rest',     '',         '',               '', '',     '',     '',                  '', 'Rest day - hydrate'],
+    [1, 'Mon', 'training', 'Pull Day', 'Barbell Row',    4, '8',    '50kg', 'Squeeze at top',    '', ''],
+  ];
+  const ws = XLSX.utils.aoa_to_sheet([headers, ...examples]);
+
+  // Column widths for readability.
+  ws['!cols'] = [
+    { wch: 6 }, { wch: 6 }, { wch: 10 }, { wch: 16 }, { wch: 20 },
+    { wch: 12 }, { wch: 12 }, { wch: 14 }, { wch: 22 }, { wch: 30 }, { wch: 22 },
+  ];
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Program');
+  XLSX.writeFile(wb, 'program-template.xlsx');
+}
+
+/**
+ * Parse an uploaded .xlsx file and import its rows as a player's program.
+ * Expects the same column layout as generateXlsxTemplate().
+ * OVERWRITES the player's existing program.
+ */
+export async function importFromXlsx(
+  file: File,
+  playerId: string,
+  coachId: string,
+): Promise<{ daysCreated: number; workoutsCreated: number; exercisesCreated: number }> {
+  const buffer = await file.arrayBuffer();
+  const wb = XLSX.read(buffer, { type: 'array' });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const raw = XLSX.utils.sheet_to_json<Record<string, string | number>>(ws, { defval: '' });
+
+  // Normalise every cell to trimmed string so the rest of the logic is identical
+  // to the CSV import path.
+  const rows = raw.map((r) =>
+    Object.fromEntries(
+      Object.entries(r).map(([k, v]) => [k.trim().toLowerCase(), String(v ?? '').trim()])
+    )
+  ) as Record<string, string>[];
+
+  if (rows.length === 0) throw new Error('The Excel file has no data rows.');
+
+  // Reuse the same grouping / upsert logic as importProgramFromCsv.
+  type DayKey = string;
+  const days = new Map<DayKey, {
+    week: number; dow: number; day_type: DayType; diet_plan: string | null;
+    workouts: Map<string, DraftWorkoutData>;
+  }>();
+
+  for (const [idx, r] of rows.entries()) {
+    const line = idx + 2;
+    const week = parseInt(r.week, 10);
+    if (!week || week < 1) throw new Error(`Row ${line}: invalid week "${r.week}"`);
+    const dowKey = r.day.toLowerCase();
+    if (!(dowKey in DAY_TO_DOW)) throw new Error(`Row ${line}: invalid day "${r.day}" (use Sat/Sun/Mon…)`);
+    const dow = DAY_TO_DOW[dowKey];
+    const day_type: DayType = r.day_type.toLowerCase() === 'rest' ? 'rest' : 'training';
+    const key = `${week}|${dow}`;
+    if (!days.has(key)) {
+      days.set(key, { week, dow, day_type, diet_plan: r.diet_plan || null, workouts: new Map() });
+    } else {
+      const d = days.get(key)!;
+      if (r.diet_plan && !d.diet_plan) d.diet_plan = r.diet_plan;
+    }
+    if (day_type === 'rest') continue;
+    if (!r.workout || !r.exercise) continue;
+    const d = days.get(key)!;
+    let w = d.workouts.get(r.workout);
+    if (!w) { w = { name: r.workout, exercises: [] }; d.workouts.set(r.workout, w); }
+    w.exercises.push({
+      name: r.exercise,
+      target_sets: r.target_sets ? parseInt(r.target_sets, 10) : null,
+      target_reps: r.target_reps || null,
+      target_weight: r.target_weight || null,
+      coach_comment: r.coach_comment || null,
+      coach_video_url: r.coach_video_url || null,
+      coach_video_is_external: !!r.coach_video_url,
+    });
+  }
+
+  await supabase.from('program_days').delete().eq('player_id', playerId);
+
+  let daysCreated = 0, workoutsCreated = 0, exercisesCreated = 0;
+  for (const d of days.values()) {
+    const drafts = [...d.workouts.values()];
+    await createFullDay(
+      {
+        player_id: playerId,
+        coach_id: coachId,
+        week_number: d.week,
+        day_of_week: d.dow,
+        day_type: d.day_type,
+        title: null,
+        diet_plan: d.diet_plan,
+      },
+      drafts
+    );
+    daysCreated++;
+    workoutsCreated += drafts.length;
+    exercisesCreated += drafts.reduce((s, w) => s + w.exercises.length, 0);
+  }
+  return { daysCreated, workoutsCreated, exercisesCreated };
 }
 
 function csvEscape(v: string): string {

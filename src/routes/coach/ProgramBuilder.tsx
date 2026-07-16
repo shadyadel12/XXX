@@ -11,8 +11,8 @@ import {
   duplicateWeek,
   duplicateDayToWeeks,
   duplicateExerciseToWeeks,
-  generateCsvTemplate,
-  importProgramFromCsv,
+  generateXlsxTemplate,
+  importFromXlsx,
   type DraftWorkoutData,
 } from '../../api/programs';
 import { listWorkouts, createWorkout, updateWorkout, deleteWorkout } from '../../api/workouts';
@@ -58,35 +58,25 @@ export default function ProgramBuilder() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['program', playerId] }),
   });
 
-  // CSV import mutation.
-  const importCsv = useMutation({
-    mutationFn: (csv: string) => importProgramFromCsv(playerId!, coachId, csv),
+  // Excel import mutation.
+  const importXlsx = useMutation({
+    mutationFn: (file: File) => importFromXlsx(file, playerId!, coachId),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['program', playerId] }),
   });
 
   function downloadTemplate() {
-    const csv = generateCsvTemplate();
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'program-template.csv';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    generateXlsxTemplate();
   }
 
-  async function handleCsvFile(e: React.ChangeEvent<HTMLInputElement>) {
+  async function handleXlsxFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
     if (!confirm('Import will REPLACE the entire existing program for this player. Continue?')) {
       e.target.value = '';
       return;
     }
-    const text = await file.text();
-    importCsv.mutate(text);
-    e.target.value = ''; // reset so re-uploading the same file works
+    importXlsx.mutate(file);
+    e.target.value = '';
   }
 
   return (
@@ -151,34 +141,34 @@ export default function ProgramBuilder() {
 
       <div className="card row" style={{ justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.6rem' }}>
         <span className="muted" style={{ fontSize: '0.85rem' }}>
-          Import from Excel/CSV (replaces the entire program) or download a blank template:
+          Import from Excel (replaces the entire program) or download a blank template:
         </span>
         <div className="row" style={{ gap: '0.5rem' }}>
           <button className="secondary" type="button" onClick={downloadTemplate}>
-            Download template
+            Download template (.xlsx)
           </button>
           <label className="secondary" style={{
             display: 'inline-flex', alignItems: 'center', padding: '0.6em 1.1em',
             background: 'var(--surface-2)', color: 'var(--text)',
             border: '1px solid var(--border)', borderRadius: 'var(--radius)',
-            cursor: importCsv.isPending ? 'not-allowed' : 'pointer', fontWeight: 600,
+            cursor: importXlsx.isPending ? 'not-allowed' : 'pointer', fontWeight: 600,
           }}>
-            {importCsv.isPending ? 'Importing…' : 'Import CSV…'}
+            {importXlsx.isPending ? 'Importing…' : 'Import Excel…'}
             <input
               type="file"
-              accept=".csv,text/csv"
-              onChange={handleCsvFile}
-              disabled={importCsv.isPending}
+              accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+              onChange={handleXlsxFile}
+              disabled={importXlsx.isPending}
               style={{ display: 'none' }}
             />
           </label>
         </div>
-        {importCsv.isSuccess && importCsv.data && (
+        {importXlsx.isSuccess && importXlsx.data && (
           <span className="badge active">
-            Imported {importCsv.data.daysCreated} days, {importCsv.data.exercisesCreated} exercises ✓
+            Imported {importXlsx.data.daysCreated} days, {importXlsx.data.exercisesCreated} exercises ✓
           </span>
         )}
-        {importCsv.error && <span className="error">{(importCsv.error as Error).message}</span>}
+        {importXlsx.error && <span className="error">{(importXlsx.error as Error).message}</span>}
       </div>
 
       <div className="day-tabs">
