@@ -12,6 +12,7 @@ import { listProgramDays } from '../../api/programs';
 import { listWorkouts } from '../../api/workouts';
 import { listExercises } from '../../api/exercises';
 import { getLog, upsertLog } from '../../api/logs';
+import { listSetLogs, replaceSetLogs } from '../../api/setLogs';
 import { listMessagesForExercise, listMessagesForPlayer } from '../../api/messages';
 import type { Exercise, ProgramDay, Workout } from '../../types/database.types';
 import VideoPlayer from '../../components/VideoPlayer';
@@ -229,42 +230,71 @@ function ExerciseBody({
     queryKey: ['log', exercise.id, playerId, logDate],
     queryFn: () => getLog(exercise.id, playerId, logDate),
   });
+  const { data: existingSets } = useQuery({
+    queryKey: ['setlogs', log?.id],
+    queryFn: () => (log?.id ? listSetLogs(log.id) : Promise.resolve([])),
+    enabled: !!log?.id,
+  });
   const { data: messages } = useQuery({
     queryKey: ['exmsg', exercise.id],
     queryFn: () => listMessagesForExercise(exercise.id),
   });
 
-  const [sets, setSets] = useState('');
-  const [reps, setReps] = useState('');
-  const [weight, setWeight] = useState('');
+  // Per-set state: one row per set with reps + weight.
+  type SetRow = { reps: string; weight: string };
+  const targetCount = Math.max(1, exercise.target_sets ?? 1);
+  const [rows, setRows] = useState<SetRow[]>(() =>
+    Array.from({ length: targetCount }, () => ({ reps: '', weight: '' }))
+  );
   const [comment, setComment] = useState('');
   const [video, setVideo] = useState<VideoValue>({ url: null, isExternal: false });
   const [initialized, setInitialized] = useState(false);
 
-  if (log && !initialized) {
-    setSets(log.actual_sets?.toString() ?? '');
-    setReps(log.actual_reps ?? '');
-    setWeight(log.actual_weight ?? '');
+  // Hydrate from existing DB rows once loaded.
+  if (log && !initialized && (existingSets !== undefined)) {
+    if (existingSets.length > 0) {
+      setRows(existingSets.map((s) => ({ reps: s.reps ?? '', weight: s.weight ?? '' })));
+    } else if (log.actual_weight || log.actual_reps) {
+      // Backward compat: a pre-per-set log with just summary columns. Seed one
+      // row from the summary so the player doesn't lose it.
+      setRows([{ reps: log.actual_reps ?? '', weight: log.actual_weight ?? '' }]);
+    }
     setComment(log.player_comment ?? '');
     setVideo({ url: log.player_video_url, isExternal: log.player_video_is_external });
     setInitialized(true);
   }
 
+  const setField = (i: number, patch: Partial<SetRow>) =>
+    setRows((rs) => rs.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
+  const addRow = () => setRows((rs) => [...rs, { reps: '', weight: '' }]);
+  const removeRow = (i: number) => setRows((rs) => rs.filter((_, idx) => idx !== i));
+
   const save = useMutation({
-    mutationFn: (completed: boolean) =>
-      upsertLog({
+    mutationFn: async (completed: boolean) => {
+      // Upsert the parent first to guarantee we have a log id. The trigger will
+      // rewrite actual_sets/actual_reps/actual_weight from the child rows once
+      // we replace them below.
+      const parent = await upsertLog({
         exercise_id: exercise.id,
         player_id: playerId,
         log_date: logDate,
-        actual_sets: sets ? Number(sets) : null,
-        actual_reps: reps || null,
-        actual_weight: weight || null,
+        actual_sets: rows.length,
+        actual_reps: null,
+        actual_weight: null,
         player_comment: comment || null,
         player_video_url: video.url,
         player_video_is_external: video.isExternal,
         is_completed: completed,
-      }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['log', exercise.id, playerId, logDate] }),
+      });
+      await replaceSetLogs(
+        parent.id,
+        rows.map((r) => ({ reps: r.reps || null, weight: r.weight || null }))
+      );
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['log', exercise.id, playerId, logDate] });
+      qc.invalidateQueries({ queryKey: ['setlogs', log?.id] });
+    },
   });
 
   const done = log?.is_completed ?? false;
@@ -298,22 +328,42 @@ function ExerciseBody({
       )}
 
       <div style={{ borderTop: '1px solid var(--border)', paddingTop: '0.6rem' }}>
-        <strong style={{ fontSize: '0.85rem' }}>Log your performance</strong>
-        <div className="row" style={{ marginTop: '0.5rem' }}>
-          <div className="field" style={{ margin: 0, flex: 1 }}>
-            <label>Sets done</label>
-            <input type="number" value={sets} onChange={(e) => setSets(e.target.value)} />
-          </div>
-          <div className="field" style={{ margin: 0, flex: 1 }}>
-            <label>Reps done</label>
-            <input value={reps} onChange={(e) => setReps(e.target.value)} />
-          </div>
-          <div className="field" style={{ margin: 0, flex: 1 }}>
-            <label>Weight used</label>
-            <input value={weight} onChange={(e) => setWeight(e.target.value)} placeholder="60kg" />
-          </div>
+        <strong style={{ fontSize: '0.85rem' }}>Log each set</strong>
+
+        <div className="stack" style={{ marginTop: '0.5rem', gap: '0.4rem' }}>
+          {rows.map((r, i) => (
+            <div key={i} className="row" style={{ gap: '0.5rem', alignItems: 'flex-end' }}>
+              <div style={{ minWidth: '3.5rem', fontWeight: 600 }}>Set {i + 1}</div>
+              <div className="field" style={{ margin: 0, flex: 1 }}>
+                <label>Reps</label>
+                <input
+                  value={r.reps}
+                  onChange={(e) => setField(i, { reps: e.target.value })}
+                  placeholder={exercise.target_reps ?? ''}
+                />
+              </div>
+              <div className="field" style={{ margin: 0, flex: 1 }}>
+                <label>Weight</label>
+                <input
+                  value={r.weight}
+                  onChange={(e) => setField(i, { weight: e.target.value })}
+                  placeholder={exercise.target_weight ?? '60kg'}
+                />
+              </div>
+              {rows.length > 1 && (
+                <button className="secondary" type="button" onClick={() => removeRow(i)} title="Remove this set">
+                  ✕
+                </button>
+              )}
+            </div>
+          ))}
         </div>
-        <div className="field" style={{ margin: '0.5rem 0 0' }}>
+
+        <button className="secondary" type="button" onClick={addRow} style={{ marginTop: '0.4rem' }}>
+          + Add set
+        </button>
+
+        <div className="field" style={{ margin: '0.7rem 0 0' }}>
           <label>Your comment</label>
           <textarea rows={2} value={comment} onChange={(e) => setComment(e.target.value)} />
         </div>
@@ -327,6 +377,7 @@ function ExerciseBody({
           <button className={done ? 'danger' : 'secondary'} onClick={() => save.mutate(!done)} disabled={save.isPending}>
             {done ? 'Mark not done' : 'Mark done ✓'}
           </button>
+          {save.error && <span className="error">{(save.error as Error).message}</span>}
         </div>
       </div>
     </div>

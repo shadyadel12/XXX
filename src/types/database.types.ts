@@ -79,6 +79,15 @@ export type ExerciseLog = {
   updated_at: string;
 }
 
+export type SetLog = {
+  id: string;
+  exercise_log_id: string;
+  set_number: number;
+  reps: string | null;
+  weight: string | null;
+  created_at: string;
+}
+
 export type Message = {
   id: string;
   coach_id: string;
@@ -260,6 +269,26 @@ export type Database = {
           is_completed?: boolean;
           created_at?: string;
           updated_at?: string;
+        };
+        Relationships: [];
+      };
+      set_logs: {
+        Row: SetLog;
+        Insert: {
+          id?: string;
+          exercise_log_id: string;
+          set_number: number;
+          reps?: string | null;
+          weight?: string | null;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          exercise_log_id?: string;
+          set_number?: number;
+          reps?: string | null;
+          weight?: string | null;
+          created_at?: string;
         };
         Relationships: [];
       };
