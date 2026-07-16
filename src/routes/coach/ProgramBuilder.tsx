@@ -9,6 +9,10 @@ import {
   upsertProgramDay,
   createFullDay,
   duplicateWeek,
+  duplicateDayToWeeks,
+  duplicateExerciseToWeeks,
+  generateCsvTemplate,
+  importProgramFromCsv,
   type DraftWorkoutData,
 } from '../../api/programs';
 import { listWorkouts, createWorkout, updateWorkout, deleteWorkout } from '../../api/workouts';
@@ -20,6 +24,7 @@ import {
 } from '../../api/exercises';
 import type { Exercise, ProgramDay, Workout } from '../../types/database.types';
 import VideoInput, { type VideoValue } from '../../components/VideoInput';
+import WeekPicker from '../../components/WeekPicker';
 
 export default function ProgramBuilder() {
   const { playerId } = useParams<{ playerId: string }>();
@@ -52,6 +57,37 @@ export default function ProgramBuilder() {
     mutationFn: () => duplicateWeek(playerId!, coachId, week, dupTo),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['program', playerId] }),
   });
+
+  // CSV import mutation.
+  const importCsv = useMutation({
+    mutationFn: (csv: string) => importProgramFromCsv(playerId!, coachId, csv),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['program', playerId] }),
+  });
+
+  function downloadTemplate() {
+    const csv = generateCsvTemplate();
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'program-template.csv';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  async function handleCsvFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!confirm('Import will REPLACE the entire existing program for this player. Continue?')) {
+      e.target.value = '';
+      return;
+    }
+    const text = await file.text();
+    importCsv.mutate(text);
+    e.target.value = ''; // reset so re-uploading the same file works
+  }
 
   return (
     <div className="stack">
@@ -113,6 +149,38 @@ export default function ProgramBuilder() {
         </div>
       )}
 
+      <div className="card row" style={{ justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.6rem' }}>
+        <span className="muted" style={{ fontSize: '0.85rem' }}>
+          Import from Excel/CSV (replaces the entire program) or download a blank template:
+        </span>
+        <div className="row" style={{ gap: '0.5rem' }}>
+          <button className="secondary" type="button" onClick={downloadTemplate}>
+            Download template
+          </button>
+          <label className="secondary" style={{
+            display: 'inline-flex', alignItems: 'center', padding: '0.6em 1.1em',
+            background: 'var(--surface-2)', color: 'var(--text)',
+            border: '1px solid var(--border)', borderRadius: 'var(--radius)',
+            cursor: importCsv.isPending ? 'not-allowed' : 'pointer', fontWeight: 600,
+          }}>
+            {importCsv.isPending ? 'Importing…' : 'Import CSV…'}
+            <input
+              type="file"
+              accept=".csv,text/csv"
+              onChange={handleCsvFile}
+              disabled={importCsv.isPending}
+              style={{ display: 'none' }}
+            />
+          </label>
+        </div>
+        {importCsv.isSuccess && importCsv.data && (
+          <span className="badge active">
+            Imported {importCsv.data.daysCreated} days, {importCsv.data.exercisesCreated} exercises ✓
+          </span>
+        )}
+        {importCsv.error && <span className="error">{(importCsv.error as Error).message}</span>}
+      </div>
+
       <div className="day-tabs">
         {WEEK_ORDER_SAT_FIRST.map((dow) => {
           const has = byDow.has(dow);
@@ -163,6 +231,16 @@ function DayCard({
   const [diet, setDiet] = useState(existing?.diet_plan ?? '');
   // Draft workouts (each with draft exercises) for a not-yet-created day.
   const [draftWorkouts, setDraftWorkouts] = useState<DraftWorkoutData[]>([]);
+  // Duplicate-day picker toggle.
+  const [dupOpen, setDupOpen] = useState(false);
+  const dupDay = useMutation({
+    mutationFn: (targetWeeks: number[]) =>
+      duplicateDayToWeeks(playerId, coachId, week, dayOfWeek, targetWeeks),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['program', playerId] });
+      setDupOpen(false);
+    },
+  });
 
   const saveDay = useMutation({
     mutationFn: async () => {
@@ -189,17 +267,40 @@ function DayCard({
 
   return (
     <div className="card stack">
-      <div>
-        <strong>{dayName}</strong>{' '}
-        {existing ? (
-          <span className="muted">
-            — {existing.day_type === 'rest' ? 'Rest day' : 'Training'}
-          </span>
-        ) : (
-          <span className="muted">— not set</span>
+      <div className="row" style={{ justifyContent: 'space-between' }}>
+        <div>
+          <strong>{dayName}</strong>{' '}
+          {existing ? (
+            <span className="muted">
+              — {existing.day_type === 'rest' ? 'Rest day' : 'Training'}
+            </span>
+          ) : (
+            <span className="muted">— not set</span>
+          )}
+        </div>
+        {existing && (
+          <button
+            type="button"
+            className="secondary"
+            onClick={() => setDupOpen((o) => !o)}
+          >
+            {dupOpen ? 'Cancel' : 'Duplicate day…'}
+          </button>
         )}
       </div>
-
+      {dupOpen && existing && (
+        <WeekPicker
+          excludeWeek={week}
+          busy={dupDay.isPending}
+          onDuplicate={(weeks) => dupDay.mutate(weeks)}
+          onCancel={() => setDupOpen(false)}
+          label={`Copy ${dayName} of Week ${week} to`}
+        />
+      )}
+      {dupDay.error && <span className="error">{(dupDay.error as Error).message}</span>}
+      {dupDay.isSuccess && (
+        <span className="badge active">Duplicated to {dupDay.data} week{dupDay.data === 1 ? '' : 's'} ✓</span>
+      )}
       <div className="stack" style={{ borderTop: '1px solid var(--border)', paddingTop: '0.9rem' }}>
         <div className="row">
           <label className="row" style={{ gap: '0.4rem' }}>
@@ -230,7 +331,14 @@ function DayCard({
         </div>
 
         {/* Existing training day: live workout editor. */}
-        {existing && dayType === 'training' && <WorkoutList programDayId={existing.id} playerId={playerId} />}
+        {existing && dayType === 'training' && (
+          <WorkoutList
+            programDayId={existing.id}
+            playerId={playerId}
+            coachId={coachId}
+            currentWeek={week}
+          />
+        )}
       </div>
     </div>
   );
@@ -366,7 +474,11 @@ function DraftWorkoutsEditor({
   );
 }
 
-function WorkoutList({ programDayId, playerId }: { programDayId: string; playerId: string }) {
+function WorkoutList({
+  programDayId, playerId, coachId, currentWeek,
+}: {
+  programDayId: string; playerId: string; coachId: string; currentWeek: number;
+}) {
   const qc = useQueryClient();
   const { data: workouts } = useQuery({
     queryKey: ['workouts', programDayId],
@@ -382,7 +494,14 @@ function WorkoutList({ programDayId, playerId }: { programDayId: string; playerI
     <div className="stack" style={{ marginTop: '0.5rem' }}>
       <strong style={{ fontSize: '0.9rem' }}>Workouts</strong>
       {(workouts ?? []).map((w) => (
-        <WorkoutCard key={w.id} workout={w} programDayId={programDayId} playerId={playerId} />
+        <WorkoutCard
+          key={w.id}
+          workout={w}
+          programDayId={programDayId}
+          playerId={playerId}
+          coachId={coachId}
+          currentWeek={currentWeek}
+        />
       ))}
       <button className="secondary" onClick={() => addWorkout.mutate()} disabled={addWorkout.isPending}>
         + Add workout
@@ -392,13 +511,13 @@ function WorkoutList({ programDayId, playerId }: { programDayId: string; playerI
 }
 
 function WorkoutCard({
-  workout,
-  programDayId,
-  playerId,
+  workout, programDayId, playerId, coachId, currentWeek,
 }: {
   workout: Workout;
   programDayId: string;
   playerId: string;
+  coachId: string;
+  currentWeek: number;
 }) {
   const qc = useQueryClient();
   const [name, setName] = useState(workout.name);
@@ -423,12 +542,21 @@ function WorkoutCard({
           Delete workout
         </button>
       </div>
-      <ExerciseEditor workoutId={workout.id} playerId={playerId} />
+      <ExerciseEditor
+        workoutId={workout.id}
+        playerId={playerId}
+        coachId={coachId}
+        currentWeek={currentWeek}
+      />
     </div>
   );
 }
 
-function ExerciseEditor({ workoutId, playerId }: { workoutId: string; playerId: string }) {
+function ExerciseEditor({
+  workoutId, playerId, coachId, currentWeek,
+}: {
+  workoutId: string; playerId: string; coachId: string; currentWeek: number;
+}) {
   const qc = useQueryClient();
   const { data: exercises } = useQuery({
     queryKey: ['exercises', workoutId],
@@ -453,7 +581,14 @@ function ExerciseEditor({ workoutId, playerId }: { workoutId: string; playerId: 
   return (
     <div className="stack" style={{ marginTop: '0.3rem' }}>
       {(exercises ?? []).map((ex) => (
-        <ExerciseRow key={ex.id} exercise={ex} playerId={playerId} workoutId={workoutId} />
+        <ExerciseRow
+          key={ex.id}
+          exercise={ex}
+          playerId={playerId}
+          workoutId={workoutId}
+          coachId={coachId}
+          currentWeek={currentWeek}
+        />
       ))}
       <button className="secondary" onClick={() => addEx.mutate()} disabled={addEx.isPending}>
         + Add exercise
@@ -466,10 +601,14 @@ function ExerciseRow({
   exercise,
   playerId,
   workoutId,
+  coachId,
+  currentWeek,
 }: {
   exercise: Exercise;
   playerId: string;
   workoutId: string;
+  coachId: string;
+  currentWeek: number;
 }) {
   const qc = useQueryClient();
   const [name, setName] = useState(exercise.name);
@@ -501,6 +640,16 @@ function ExerciseRow({
     onSuccess: () => qc.invalidateQueries({ queryKey: ['exercises', workoutId] }),
   });
 
+  const [dupOpen, setDupOpen] = useState(false);
+  const dupEx = useMutation({
+    mutationFn: (targetWeeks: number[]) =>
+      duplicateExerciseToWeeks(playerId, coachId, exercise.id, targetWeeks),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['program', playerId] });
+      setDupOpen(false);
+    },
+  });
+
   return (
     <div className="card stack" style={{ background: 'var(--surface)' }}>
       <div className="field" style={{ margin: 0 }}>
@@ -526,15 +675,31 @@ function ExerciseRow({
         <textarea rows={2} value={comment} onChange={(e) => setComment(e.target.value)} />
       </div>
       <VideoInput ownerId={playerId} value={video} onChange={setVideo} />
-      <div className="row">
+      <div className="row" style={{ flexWrap: 'wrap' }}>
         <button onClick={() => save.mutate()} disabled={save.isPending}>
           {save.isPending ? 'Saving…' : 'Save'}
+        </button>
+        <button className="secondary" type="button" onClick={() => setDupOpen((o) => !o)}>
+          {dupOpen ? 'Cancel' : 'Duplicate…'}
         </button>
         <button className="danger" onClick={() => del.mutate()} disabled={del.isPending}>
           Delete
         </button>
         {save.error && <span className="error">{(save.error as Error).message}</span>}
       </div>
+      {dupOpen && (
+        <WeekPicker
+          excludeWeek={currentWeek}
+          busy={dupEx.isPending}
+          onDuplicate={(weeks) => dupEx.mutate(weeks)}
+          onCancel={() => setDupOpen(false)}
+          label={`Copy "${exercise.name}" to (same day, weeks)`}
+        />
+      )}
+      {dupEx.error && <span className="error">{(dupEx.error as Error).message}</span>}
+      {dupEx.isSuccess && (
+        <span className="badge active">Duplicated to {dupEx.data} week{dupEx.data === 1 ? '' : 's'} ✓</span>
+      )}
     </div>
   );
 }

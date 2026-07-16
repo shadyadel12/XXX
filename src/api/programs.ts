@@ -183,3 +183,349 @@ export async function duplicateWeek(
   }
   return days.length;
 }
+
+// ---------------------------------------------------------------------------
+// Granular duplication: copy a single day OR a single exercise into any subset
+// of other weeks.
+// ---------------------------------------------------------------------------
+
+/** Read one day fully (workouts + exercises) as a set of drafts. Null if empty. */
+async function readDayAsDrafts(
+  playerId: string,
+  week: number,
+  dayOfWeek: number
+): Promise<{ day: ProgramDay; drafts: DraftWorkoutData[] } | null> {
+  const day = await getProgramDay(playerId, week, dayOfWeek);
+  if (!day) return null;
+  const { data: workouts } = await supabase
+    .from('workouts')
+    .select('*')
+    .eq('program_day_id', day.id)
+    .order('position');
+  const drafts: DraftWorkoutData[] = [];
+  for (const w of workouts ?? []) {
+    const { data: exs } = await supabase
+      .from('exercises')
+      .select('*')
+      .eq('workout_id', w.id)
+      .order('position');
+    drafts.push({
+      name: w.name,
+      exercises: (exs ?? []).map((ex) => ({
+        name: ex.name,
+        target_sets: ex.target_sets,
+        target_reps: ex.target_reps,
+        target_weight: ex.target_weight,
+        coach_comment: ex.coach_comment,
+        coach_video_url: ex.coach_video_url,
+        coach_video_is_external: ex.coach_video_is_external,
+      })),
+    });
+  }
+  return { day, drafts };
+}
+
+/**
+ * Duplicate one day (with all workouts + exercises) into the given target
+ * weeks. The target day at (week, day_of_week) is OVERWRITTEN in each week.
+ */
+export async function duplicateDayToWeeks(
+  playerId: string,
+  coachId: string,
+  sourceWeek: number,
+  sourceDow: number,
+  targetWeeks: number[]
+): Promise<number> {
+  const source = await readDayAsDrafts(playerId, sourceWeek, sourceDow);
+  if (!source) return 0;
+  let done = 0;
+  for (const w of targetWeeks) {
+    if (w === sourceWeek) continue;
+    // Wipe target day so we don't stack duplicate workouts on top.
+    await supabase
+      .from('program_days')
+      .delete()
+      .eq('player_id', playerId)
+      .eq('week_number', w)
+      .eq('day_of_week', sourceDow);
+    await createFullDay(
+      {
+        player_id: playerId,
+        coach_id: coachId,
+        week_number: w,
+        day_of_week: sourceDow,
+        day_type: source.day.day_type,
+        title: source.day.title,
+        diet_plan: source.day.diet_plan,
+      },
+      source.drafts
+    );
+    done++;
+  }
+  return done;
+}
+
+/**
+ * Duplicate a single exercise into the given target weeks (same day-of-week).
+ * For each target week: ensures a training day exists at (week, dow), finds or
+ * creates a workout with the same name, then APPENDS the exercise to it.
+ */
+export async function duplicateExerciseToWeeks(
+  playerId: string,
+  coachId: string,
+  sourceExerciseId: string,
+  targetWeeks: number[]
+): Promise<number> {
+  // Load source exercise + parent workout + parent day.
+  const { data: ex, error: exErr } = await supabase
+    .from('exercises')
+    .select('*')
+    .eq('id', sourceExerciseId)
+    .single();
+  if (exErr || !ex) throw exErr ?? new Error('Exercise not found');
+  const { data: workout, error: wErr } = await supabase
+    .from('workouts')
+    .select('*')
+    .eq('id', ex.workout_id)
+    .single();
+  if (wErr || !workout) throw wErr ?? new Error('Workout not found');
+  const { data: srcDay, error: dErr } = await supabase
+    .from('program_days')
+    .select('*')
+    .eq('id', workout.program_day_id)
+    .single();
+  if (dErr || !srcDay) throw dErr ?? new Error('Day not found');
+
+  let done = 0;
+  for (const week of targetWeeks) {
+    if (week === srcDay.week_number) continue;
+
+    // Ensure day exists for this week/dow.
+    let day = await getProgramDay(playerId, week, srcDay.day_of_week);
+    if (!day) {
+      day = await upsertProgramDay({
+        player_id: playerId,
+        coach_id: coachId,
+        week_number: week,
+        day_of_week: srcDay.day_of_week,
+        day_type: 'training',
+        title: null,
+        diet_plan: null,
+      });
+    } else if (day.day_type !== 'training') {
+      // Flip rest -> training so we can add an exercise.
+      const { data: flipped } = await supabase
+        .from('program_days')
+        .update({ day_type: 'training' })
+        .eq('id', day.id)
+        .select()
+        .single();
+      if (flipped) day = flipped;
+    }
+
+    // Find (or create) a workout with the same name in this day.
+    const { data: existingWorkouts } = await supabase
+      .from('workouts')
+      .select('*')
+      .eq('program_day_id', day.id);
+    let targetWorkout = (existingWorkouts ?? []).find((w) => w.name === workout.name);
+    if (!targetWorkout) {
+      const { data: created, error: cErr } = await supabase
+        .from('workouts')
+        .insert({
+          program_day_id: day.id,
+          name: workout.name,
+          position: existingWorkouts?.length ?? 0,
+        })
+        .select()
+        .single();
+      if (cErr) throw cErr;
+      targetWorkout = created;
+    }
+
+    // Compute next position within the target workout.
+    const { data: existingExs } = await supabase
+      .from('exercises')
+      .select('id')
+      .eq('workout_id', targetWorkout.id);
+    const nextPos = existingExs?.length ?? 0;
+
+    const { error: iErr } = await supabase.from('exercises').insert({
+      workout_id: targetWorkout.id,
+      position: nextPos,
+      name: ex.name,
+      target_sets: ex.target_sets,
+      target_reps: ex.target_reps,
+      target_weight: ex.target_weight,
+      coach_comment: ex.coach_comment,
+      coach_video_url: ex.coach_video_url,
+      coach_video_is_external: ex.coach_video_is_external,
+    });
+    if (iErr) throw iErr;
+    done++;
+  }
+  return done;
+}
+
+// ---------------------------------------------------------------------------
+// CSV import / export
+// ---------------------------------------------------------------------------
+
+const CSV_COLUMNS = [
+  'week',
+  'day',           // Sat / Sun / Mon / Tue / Wed / Thu / Fri
+  'day_type',      // training / rest
+  'workout',       // workout name (blank for rest)
+  'exercise',      // exercise name (blank for rest)
+  'target_sets',
+  'target_reps',
+  'target_weight',
+  'coach_comment',
+  'coach_video_url',
+  'diet_plan',     // applied per (week, day) from first non-blank row
+] as const;
+
+/** Blank template CSV: header + a few example rows. */
+export function generateCsvTemplate(): string {
+  const header = CSV_COLUMNS.join(',');
+  const examples = [
+    ['1', 'Sat', 'training', 'Push Day', 'Bench Press',   '4', '8-12', '60kg',  'Controlled tempo', '', 'High protein day'],
+    ['1', 'Sat', 'training', 'Push Day', 'Overhead Press','3', '10',   '35kg',  '',                  '', ''],
+    ['1', 'Sun', 'rest',     '',         '',              '',  '',     '',       '',                  '', 'Rest day - hydrate'],
+    ['1', 'Mon', 'training', 'Pull Day', 'Barbell Row',   '4', '8',    '50kg',  'Squeeze at top',    '', ''],
+  ];
+  return [header, ...examples.map((r) => r.map(csvEscape).join(','))].join('\n');
+}
+
+function csvEscape(v: string): string {
+  if (v.includes(',') || v.includes('"') || v.includes('\n')) {
+    return '"' + v.replace(/"/g, '""') + '"';
+  }
+  return v;
+}
+
+/** Parse a CSV string into an array of row objects keyed by column name. */
+function parseCsv(text: string): Record<string, string>[] {
+  const rows: string[][] = [];
+  let field = '';
+  let row: string[] = [];
+  let inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { field += '"'; i++; }
+        else { inQuotes = false; }
+      } else {
+        field += c;
+      }
+    } else {
+      if (c === '"') { inQuotes = true; }
+      else if (c === ',') { row.push(field); field = ''; }
+      else if (c === '\n' || c === '\r') {
+        if (c === '\r' && text[i + 1] === '\n') i++;
+        row.push(field); field = '';
+        if (row.some((x) => x.trim().length > 0)) rows.push(row);
+        row = [];
+      } else {
+        field += c;
+      }
+    }
+  }
+  if (field.length > 0 || row.length > 0) {
+    row.push(field);
+    if (row.some((x) => x.trim().length > 0)) rows.push(row);
+  }
+  if (rows.length === 0) return [];
+  const header = rows[0].map((h) => h.trim().toLowerCase());
+  return rows.slice(1).map((r) => {
+    const obj: Record<string, string> = {};
+    header.forEach((h, i) => { obj[h] = (r[i] ?? '').trim(); });
+    return obj;
+  });
+}
+
+const DAY_TO_DOW: Record<string, number> = {
+  sun: 0, sunday: 0,
+  mon: 1, monday: 1,
+  tue: 2, tuesday: 2,
+  wed: 3, wednesday: 3,
+  thu: 4, thursday: 4,
+  fri: 5, friday: 5,
+  sat: 6, saturday: 6,
+};
+
+/**
+ * Import a CSV into the player's program. OVERWRITES the entire existing
+ * program for this player (deletes all program_days first). Returns totals.
+ */
+export async function importProgramFromCsv(
+  playerId: string,
+  coachId: string,
+  csv: string
+): Promise<{ daysCreated: number; workoutsCreated: number; exercisesCreated: number }> {
+  const rows = parseCsv(csv);
+  if (rows.length === 0) throw new Error('CSV is empty.');
+
+  // Validate + group.
+  type DayKey = string; // "week|dow"
+  const days = new Map<DayKey, {
+    week: number; dow: number; day_type: DayType; diet_plan: string | null;
+    workouts: Map<string, DraftWorkoutData>;
+  }>();
+
+  for (const [idx, r] of rows.entries()) {
+    const line = idx + 2; // 1-indexed + header row
+    const week = parseInt(r.week, 10);
+    if (!week || week < 1) throw new Error(`Row ${line}: invalid week "${r.week}"`);
+    const dowKey = r.day.toLowerCase();
+    if (!(dowKey in DAY_TO_DOW)) throw new Error(`Row ${line}: invalid day "${r.day}" (use Sat/Sun/Mon...)`);
+    const dow = DAY_TO_DOW[dowKey];
+    const day_type: DayType = r.day_type.toLowerCase() === 'rest' ? 'rest' : 'training';
+    const key = `${week}|${dow}`;
+    if (!days.has(key)) {
+      days.set(key, { week, dow, day_type, diet_plan: r.diet_plan || null, workouts: new Map() });
+    } else {
+      const d = days.get(key)!;
+      if (r.diet_plan && !d.diet_plan) d.diet_plan = r.diet_plan;
+    }
+    if (day_type === 'rest') continue;
+    if (!r.workout || !r.exercise) continue; // allow rest-typed rows in a training day? skip empty
+    const d = days.get(key)!;
+    let w = d.workouts.get(r.workout);
+    if (!w) { w = { name: r.workout, exercises: [] }; d.workouts.set(r.workout, w); }
+    w.exercises.push({
+      name: r.exercise,
+      target_sets: r.target_sets ? parseInt(r.target_sets, 10) : null,
+      target_reps: r.target_reps || null,
+      target_weight: r.target_weight || null,
+      coach_comment: r.coach_comment || null,
+      coach_video_url: r.coach_video_url || null,
+      coach_video_is_external: !!r.coach_video_url,
+    });
+  }
+
+  // Wipe entire program for this player.
+  await supabase.from('program_days').delete().eq('player_id', playerId);
+
+  let daysCreated = 0, workoutsCreated = 0, exercisesCreated = 0;
+  for (const d of days.values()) {
+    const drafts = [...d.workouts.values()];
+    await createFullDay(
+      {
+        player_id: playerId,
+        coach_id: coachId,
+        week_number: d.week,
+        day_of_week: d.dow,
+        day_type: d.day_type,
+        title: null,
+        diet_plan: d.diet_plan,
+      },
+      drafts
+    );
+    daysCreated++;
+    workoutsCreated += drafts.length;
+    exercisesCreated += drafts.reduce((s, w) => s + w.exercises.length, 0);
+  }
+  return { daysCreated, workoutsCreated, exercisesCreated };
+}
