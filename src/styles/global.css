@@ -143,6 +143,36 @@ label {
 .trend-up { color: var(--success); font-weight: 600; }
 .trend-down { color: var(--danger); font-weight: 600; }
 
+.day-tabs {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+.day-tab {
+  flex: 1 1 0;
+  min-width: 3.5rem;
+  padding: 0.55em 0.6em;
+  background: var(--surface);
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-weight: 600;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.day-tab:hover:not(:disabled) {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.day-tab.active {
+  background: var(--accent);
+  color: white;
+  border-color: var(--accent);
+}
+.day-tab.has-plan:not(.active) {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
 .topbar {
   display: flex;
   justify-content: space-between;

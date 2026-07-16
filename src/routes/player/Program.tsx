@@ -1,7 +1,13 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '../../auth/AuthContext';
-import { DAY_NAMES, todayISO } from '../../lib/dates';
+import {
+  DAY_NAMES,
+  DAY_SHORT,
+  WEEK_ORDER_SAT_FIRST,
+  todayDayOfWeek,
+  todayISO,
+} from '../../lib/dates';
 import { listProgramDays } from '../../api/programs';
 import { listWorkouts } from '../../api/workouts';
 import { listExercises } from '../../api/exercises';
@@ -25,6 +31,10 @@ export default function PlayerProgram() {
   const weekDays = (days ?? [])
     .filter((d) => d.week_number === week)
     .sort((a, b) => a.day_of_week - b.day_of_week);
+  const byDow = new Map(weekDays.map((d) => [d.day_of_week, d]));
+
+  const [selectedDow, setSelectedDow] = useState<number>(todayDayOfWeek());
+  const selectedDay = byDow.get(selectedDow) ?? null;
 
   const { data: generalMessages } = useQuery({
     queryKey: ['playerMessages', playerId],
@@ -70,55 +80,69 @@ export default function PlayerProgram() {
         </div>
       )}
 
-      {weekDays.map((day) => (
-        <DayAccordion key={day.id} day={day} playerId={playerId} />
-      ))}
+      {weekDays.length > 0 && (
+        <>
+          <div className="day-tabs">
+            {WEEK_ORDER_SAT_FIRST.map((dow) => {
+              const has = byDow.has(dow);
+              const active = dow === selectedDow;
+              return (
+                <button
+                  key={dow}
+                  type="button"
+                  className={`day-tab ${active ? 'active' : ''} ${has ? 'has-plan' : ''}`}
+                  onClick={() => setSelectedDow(dow)}
+                >
+                  {DAY_SHORT[dow]}
+                </button>
+              );
+            })}
+          </div>
+
+          {selectedDay ? (
+            <DayPanel key={selectedDay.id} day={selectedDay} playerId={playerId} />
+          ) : (
+            <div className="card">
+              <p className="muted">
+                Nothing scheduled for {DAY_NAMES[selectedDow]}.
+              </p>
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }
 
-/** Level 1: a day. Collapsed by default. */
-function DayAccordion({ day, playerId }: { day: ProgramDay; playerId: string }) {
-  const [open, setOpen] = useState(false);
-
+/** The active day's panel. Contents always shown; workouts inside are collapsible. */
+function DayPanel({ day, playerId }: { day: ProgramDay; playerId: string }) {
   const { data: workouts } = useQuery({
     queryKey: ['workouts', day.id],
     queryFn: () => listWorkouts(day.id),
-    enabled: open && day.day_type === 'training',
+    enabled: day.day_type === 'training',
   });
 
   return (
     <div className="card stack" style={{ gap: '0.5rem' }}>
-      <button
-        className="secondary"
-        style={{ textAlign: 'left', width: '100%', display: 'flex', justifyContent: 'space-between' }}
-        onClick={() => setOpen((o) => !o)}
-      >
-        <span>
-          <strong>{DAY_NAMES[day.day_of_week]}</strong>
-          <span className="muted"> — {day.day_type === 'rest' ? 'Rest day' : 'Training'}</span>
-        </span>
-        <span>{open ? '▾' : '▸'}</span>
-      </button>
+      <div>
+        <strong>{DAY_NAMES[day.day_of_week]}</strong>
+        <span className="muted"> — {day.day_type === 'rest' ? 'Rest day' : 'Training'}</span>
+      </div>
 
-      {open && (
-        <div className="stack" style={{ paddingLeft: '0.5rem' }}>
-          {day.diet_plan && (
-            <div>
-              <strong style={{ fontSize: '0.9rem' }}>Diet plan</strong>
-              <p className="muted" style={{ whiteSpace: 'pre-wrap', margin: '0.2rem 0 0' }}>
-                {day.diet_plan}
-              </p>
-            </div>
-          )}
-          {day.day_type === 'training' &&
-            (workouts ?? []).map((w) => (
-              <WorkoutAccordion key={w.id} workout={w} playerId={playerId} />
-            ))}
-          {day.day_type === 'training' && (workouts ?? []).length === 0 && (
-            <p className="muted" style={{ fontSize: '0.85rem' }}>No workouts for this day.</p>
-          )}
+      {day.diet_plan && (
+        <div>
+          <strong style={{ fontSize: '0.9rem' }}>Diet plan</strong>
+          <p className="muted" style={{ whiteSpace: 'pre-wrap', margin: '0.2rem 0 0' }}>
+            {day.diet_plan}
+          </p>
         </div>
+      )}
+      {day.day_type === 'training' &&
+        (workouts ?? []).map((w) => (
+          <WorkoutAccordion key={w.id} workout={w} playerId={playerId} />
+        ))}
+      {day.day_type === 'training' && (workouts ?? []).length === 0 && (
+        <p className="muted" style={{ fontSize: '0.85rem' }}>No workouts for this day.</p>
       )}
     </div>
   );

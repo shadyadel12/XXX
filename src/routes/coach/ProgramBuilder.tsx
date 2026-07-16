@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '../../auth/AuthContext';
-import { DAY_NAMES } from '../../lib/dates';
+import { DAY_NAMES, DAY_SHORT, WEEK_ORDER_SAT_FIRST, todayDayOfWeek } from '../../lib/dates';
 import { getPlayerForCoach } from '../../api/players';
 import {
   listProgramDays,
@@ -42,6 +42,10 @@ export default function ProgramBuilder() {
   const weekDays = (days ?? []).filter((d) => d.week_number === week);
   const byDow = new Map(weekDays.map((d) => [d.day_of_week, d]));
   const qc = useQueryClient();
+
+  // Which day tab is active. Defaults to today's weekday.
+  const [selectedDow, setSelectedDow] = useState<number>(todayDayOfWeek());
+  const selectedExisting = byDow.get(selectedDow) ?? null;
 
   const [dupTo, setDupTo] = useState(week + 1);
   const duplicate = useMutation({
@@ -109,19 +113,32 @@ export default function ProgramBuilder() {
         </div>
       )}
 
-      <div className="stack">
-        {DAY_NAMES.map((name, dow) => (
-          <DayCard
-            key={dow}
-            playerId={playerId!}
-            coachId={coachId}
-            week={week}
-            dayOfWeek={dow}
-            dayName={name}
-            existing={byDow.get(dow) ?? null}
-          />
-        ))}
+      <div className="day-tabs">
+        {WEEK_ORDER_SAT_FIRST.map((dow) => {
+          const has = byDow.has(dow);
+          const active = dow === selectedDow;
+          return (
+            <button
+              key={dow}
+              type="button"
+              className={`day-tab ${active ? 'active' : ''} ${has ? 'has-plan' : ''}`}
+              onClick={() => setSelectedDow(dow)}
+            >
+              {DAY_SHORT[dow]}
+            </button>
+          );
+        })}
       </div>
+
+      <DayCard
+        key={`${week}-${selectedDow}`}
+        playerId={playerId!}
+        coachId={coachId}
+        week={week}
+        dayOfWeek={selectedDow}
+        dayName={DAY_NAMES[selectedDow]}
+        existing={selectedExisting}
+      />
     </div>
   );
 }
@@ -142,7 +159,6 @@ function DayCard({
   existing: ProgramDay | null;
 }) {
   const qc = useQueryClient();
-  const [open, setOpen] = useState(false);
   const [dayType, setDayType] = useState(existing?.day_type ?? 'training');
   const [diet, setDiet] = useState(existing?.diet_plan ?? '');
   // Draft workouts (each with draft exercises) for a not-yet-created day.
@@ -173,56 +189,49 @@ function DayCard({
 
   return (
     <div className="card stack">
-      <div className="row" style={{ justifyContent: 'space-between' }}>
-        <div>
-          <strong>{dayName}</strong>{' '}
-          {existing ? (
-            <span className="muted">
-              — {existing.day_type === 'rest' ? 'Rest day' : 'Training'}
-            </span>
-          ) : (
-            <span className="muted">— not set</span>
-          )}
-        </div>
-        <button className="secondary" onClick={() => setOpen((o) => !o)}>
-          {open ? 'Close' : existing ? 'Edit' : 'Set up'}
-        </button>
+      <div>
+        <strong>{dayName}</strong>{' '}
+        {existing ? (
+          <span className="muted">
+            — {existing.day_type === 'rest' ? 'Rest day' : 'Training'}
+          </span>
+        ) : (
+          <span className="muted">— not set</span>
+        )}
       </div>
 
-      {open && (
-        <div className="stack" style={{ borderTop: '1px solid var(--border)', paddingTop: '0.9rem' }}>
-          <div className="row">
-            <label className="row" style={{ gap: '0.4rem' }}>
-              <input type="radio" style={{ width: 'auto' }} checked={dayType === 'training'} onChange={() => setDayType('training')} />
-              Training day
-            </label>
-            <label className="row" style={{ gap: '0.4rem' }}>
-              <input type="radio" style={{ width: 'auto' }} checked={dayType === 'rest'} onChange={() => setDayType('rest')} />
-              Rest day
-            </label>
-          </div>
-
-          <div className="field" style={{ margin: 0 }}>
-            <label>Diet plan (optional)</label>
-            <textarea rows={2} value={diet} onChange={(e) => setDiet(e.target.value)} />
-          </div>
-
-          {/* New training day: build workouts + exercises before the first save. */}
-          {!existing && dayType === 'training' && (
-            <DraftWorkoutsEditor drafts={draftWorkouts} setDrafts={setDraftWorkouts} />
-          )}
-
-          <div className="row">
-            <button onClick={() => saveDay.mutate()} disabled={saveDay.isPending}>
-              {saveDay.isPending ? 'Saving…' : existing ? 'Save day' : 'Create day'}
-            </button>
-            {saveDay.error && <span className="error">{(saveDay.error as Error).message}</span>}
-          </div>
-
-          {/* Existing training day: live workout editor. */}
-          {existing && dayType === 'training' && <WorkoutList programDayId={existing.id} playerId={playerId} />}
+      <div className="stack" style={{ borderTop: '1px solid var(--border)', paddingTop: '0.9rem' }}>
+        <div className="row">
+          <label className="row" style={{ gap: '0.4rem' }}>
+            <input type="radio" style={{ width: 'auto' }} checked={dayType === 'training'} onChange={() => setDayType('training')} />
+            Training day
+          </label>
+          <label className="row" style={{ gap: '0.4rem' }}>
+            <input type="radio" style={{ width: 'auto' }} checked={dayType === 'rest'} onChange={() => setDayType('rest')} />
+            Rest day
+          </label>
         </div>
-      )}
+
+        <div className="field" style={{ margin: 0 }}>
+          <label>Diet plan (optional)</label>
+          <textarea rows={2} value={diet} onChange={(e) => setDiet(e.target.value)} />
+        </div>
+
+        {/* New training day: build workouts + exercises before the first save. */}
+        {!existing && dayType === 'training' && (
+          <DraftWorkoutsEditor drafts={draftWorkouts} setDrafts={setDraftWorkouts} />
+        )}
+
+        <div className="row">
+          <button onClick={() => saveDay.mutate()} disabled={saveDay.isPending}>
+            {saveDay.isPending ? 'Saving…' : existing ? 'Save day' : 'Create day'}
+          </button>
+          {saveDay.error && <span className="error">{(saveDay.error as Error).message}</span>}
+        </div>
+
+        {/* Existing training day: live workout editor. */}
+        {existing && dayType === 'training' && <WorkoutList programDayId={existing.id} playerId={playerId} />}
+      </div>
     </div>
   );
 }
