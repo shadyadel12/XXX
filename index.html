@@ -4,6 +4,16 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Coach Platform</title>
+    <!-- GitHub Pages SPA redirect: restores the path that 404.html captured -->
+    <script>
+      (function () {
+        var l = window.location;
+        if (l.search.startsWith('?/')) {
+          var path = l.search.slice(1);
+          window.history.replaceState(null, '', path + (l.hash || ''));
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

@@ -1,0 +1,17 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <script>
+      // Redirect unknown paths back to index.html as a query string so the SPA can restore them.
+      window.location.replace(
+        window.location.origin +
+        window.location.pathname.split('/').slice(0, 1).join('/') +
+        '/?/' +
+        window.location.pathname.slice(1) +
+        (window.location.search ? '&' + window.location.search.slice(1) : '') +
+        window.location.hash
+      );
+    </script>
+  </head>
+</html>
